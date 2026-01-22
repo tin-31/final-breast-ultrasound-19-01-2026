@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 st.set_page_config(page_title="TRUST-MED AI", page_icon="🩺", layout="wide")
 DEVICE = 'cpu'
 
-# 🔥 FILE ID (Giữ nguyên ID của bạn)
+# 🔥 HÃY ĐẢM BẢO FILE ID CỦA BẠN ĐÃ ĐÚNG
 SEG_FILE_ID = '1eUtmSEXAh9r-o_qRSk5oaYK7yfxjITfl' 
 CLS_FILE_ID = '1-v64E5VqSvbuKDYtdGDJBqUcWe9QfPVe'
 
@@ -25,12 +25,9 @@ CLS_PATH = 'TRUST_MED_CLS_BIRADS_FINAL.pth'
 def load_models():
     # Tải file từ Drive
     if not os.path.exists(SEG_PATH):
-        url = f'https://drive.google.com/uc?id={SEG_FILE_ID}'
-        gdown.download(url, SEG_PATH, quiet=False)
-    
+        gdown.download(f'https://drive.google.com/uc?id={SEG_FILE_ID}', SEG_PATH, quiet=False)
     if not os.path.exists(CLS_PATH):
-        url = f'https://drive.google.com/uc?id={CLS_FILE_ID}'
-        gdown.download(url, CLS_PATH, quiet=False)
+        gdown.download(f'https://drive.google.com/uc?id={CLS_FILE_ID}', CLS_PATH, quiet=False)
 
     # Load Models
     seg_model = smp.Unet(encoder_name="resnet34", in_channels=3, classes=1, decoder_attention_type="scse")
@@ -121,15 +118,17 @@ if uploaded_file is not None:
         mask_resized = cv2.resize(mask_pred, (img_np.shape[1], img_np.shape[0]), interpolation=cv2.INTER_NEAREST)
         mask_ratio = np.sum(mask_resized) / (img_np.shape[0]*img_np.shape[1])
         
+        # --- CHUẨN BỊ ẢNH MASK ĐỂ HIỂN THỊ ---
+        # Chuyển từ 0/1 float sang 0/255 uint8 để hiển thị thành ảnh đen trắng
+        mask_display = (mask_resized * 255).astype(np.uint8)
+
         # 2. Get Box & Crop
         (x1, y1, x2, y2), roi_type = get_bounding_box(mask_resized.astype(np.uint8))
         roi_img = img_np[y1:y2, x1:x2]
         
-        # 3. VẼ KHUNG ĐỎ (RED BOX) - DÀY HƠN
+        # 3. VẼ KHUNG ĐỎ (RED BOX)
         img_with_box = img_np.copy()
-        # Màu đỏ (255, 0, 0), Độ dày = 4
         cv2.rectangle(img_with_box, (x1, y1), (x2, y2), (255, 0, 0), 4) 
-        # Chữ to hơn
         cv2.putText(img_with_box, "TUMOR DETECTED", (x1, max(y1-10, 20)), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 0), 2)
 
@@ -159,22 +158,26 @@ if uploaded_file is not None:
             else:
                 status_text = "Khả năng cao LÀNH TÍNH"; status_color = "blue"
 
-    # --- HIỂN THỊ KẾT QUẢ (3 CỘT RÕ RÀNG) ---
-    col1, col2, col3 = st.columns(3)
+    # --- HIỂN THỊ KẾT QUẢ (CHUYỂN SANG 4 CỘT) ---
+    col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        st.image(img_with_box, caption="1. Định vị Khối u (Đỏ)", use_column_width=True)
+        st.image(img_with_box, caption="1. Định vị (Hộp đỏ)", use_column_width=True)
     
+    # --- CỘT MỚI: HIỂN THỊ MASK ---
     with col2:
-        st.image(roi_img, caption="2. Ảnh cắt cận cảnh (ROI)", use_column_width=True)
+        st.image(mask_display, caption="2. Mask (Phân đoạn)", use_column_width=True, clamp=True)
         
     with col3:
+        st.image(roi_img, caption="3. Ảnh cắt (ROI)", use_column_width=True)
+        
+    with col4:
         heatmap_colored = cv2.applyColorMap(np.uint8(255*heatmap), cv2.COLORMAP_JET)
         heatmap_colored = cv2.cvtColor(heatmap_colored, cv2.COLOR_BGR2RGB)
         superimposed = cv2.addWeighted(cv2.resize(roi_img, (224,224)), 0.6, heatmap_colored, 0.4, 0)
-        st.image(superimposed, caption="3. AI 'soi' (Grad-CAM)", use_column_width=True)
+        st.image(superimposed, caption="4. Giải thích (Grad-CAM)", use_column_width=True)
 
-    # --- BẢNG THÔNG SỐ BÊN DƯỚI ---
+    # --- BẢNG THÔNG SỐ ---
     st.divider()
     c1, c2 = st.columns([1, 1])
     
