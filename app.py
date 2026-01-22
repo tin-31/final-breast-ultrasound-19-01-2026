@@ -46,19 +46,50 @@ except Exception as e:
     st.error(f"Lỗi khởi động: {e}")
     st.stop()
 
-# --- 2. CÁC HÀM XỬ LÝ ---
-def get_bounding_box(mask_pred, padding=0.2):
-    contours, _ = cv2.findContours(mask_pred, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+# --- 2. CÁC HÀM XỬ LÝ (CẬP NHẬT MỚI) ---
+
+def clean_mask_output(mask_prob, threshold=0.5):
+    """
+    Hàm hậu xử lý: Lọc nhiễu muối tiêu và chỉ giữ lại khối u lớn nhất.
+    """
+    # 1. Thresholding
+    mask_binary = (mask_prob > threshold).astype(np.uint8)
+    
+    # 2. Morphological Opening (Xóa đốm trắng nhỏ)
+    kernel = np.ones((5,5), np.uint8)
+    mask_clean = cv2.morphologyEx(mask_binary, cv2.MORPH_OPEN, kernel)
+    
+    # 3. Giữ lại vùng lớn nhất (Largest Component Analysis)
+    contours, _ = cv2.findContours(mask_clean, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    if not contours:
+        return np.zeros_like(mask_clean) # Không tìm thấy gì trả về đen
+    
+    # Tìm contour lớn nhất
+    c = max(contours, key=cv2.contourArea)
+    
+    # Tạo mask mới chỉ chứa contour lớn nhất này
+    final_mask = np.zeros_like(mask_clean)
+    cv2.drawContours(final_mask, [c], -1, 1, thickness=cv2.FILLED)
+    
+    return final_mask
+
+def get_bounding_box_from_mask(mask_clean, padding=0.2):
+    """Tìm tọa độ từ mask đã làm sạch"""
+    contours, _ = cv2.findContours(mask_clean, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if contours:
         c = max(contours, key=cv2.contourArea)
         x, y, rw, rh = cv2.boundingRect(c)
+        
+        # Logic Padding
         pad_w = int(rw * padding); pad_h = int(rh * padding)
         x1 = max(0, x - pad_w); y1 = max(0, y - pad_h)
-        x2 = min(mask_pred.shape[1], x + rw + pad_w)
-        y2 = min(mask_pred.shape[0], y + rh + pad_h)
+        x2 = min(mask_clean.shape[1], x + rw + pad_w)
+        y2 = min(mask_clean.shape[0], y + rh + pad_h)
         return (x1, y1, x2, y2), "Soft-ROI"
     else:
-        h, w = mask_pred.shape
+        # Fallback
+        h, w = mask_clean.shape
         cy, cx = h//2, w//2; sz = min(h, w)//2
         return (cx-sz, cy-sz, cx+sz, cy+sz), "Fallback"
 
@@ -101,8 +132,8 @@ if uploaded_file is not None:
     image = Image.open(uploaded_file).convert("RGB")
     img_np = np.array(image)
     
-    with st.spinner("🤖 AI đang phân tích..."):
-        # 1. Segmentation
+    with st.spinner("🤖 AI đang phân tích (Đã bật bộ lọc nhiễu)..."):
+        # 1. Segmentation Inference
         preprocess_seg = transforms.Compose([
             transforms.Resize((256, 256)), transforms.ToTensor(),
             transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
@@ -111,27 +142,26 @@ if uploaded_file is not None:
         
         with torch.no_grad():
             mask_logits = seg_model(input_seg)
-            # Lấy xác suất trước (để resize cho mượt)
             mask_prob = torch.sigmoid(mask_logits).cpu().detach().numpy()[0,0]
         
-        # Resize bản đồ xác suất về kích thước gốc
+        # Resize xác suất về kích thước gốc
         mask_prob_resized = cv2.resize(mask_prob, (img_np.shape[1], img_np.shape[0]))
-        # Ngưỡng 0.5 để tạo ảnh đen trắng
-        mask_binary = (mask_prob_resized > 0.5).astype(np.uint8)
         
-        # TÍNH TOÁN HIỂN THỊ MASK (QUAN TRỌNG)
-        # Chuyển thành ảnh RGB (Trắng/Đen) để Streamlit hiển thị đúng
-        mask_display = cv2.cvtColor(mask_binary * 255, cv2.COLOR_GRAY2RGB)
+        # --- 🔥 QUAN TRỌNG: HẬU XỬ LÝ LÀM SẠCH MASK ---
+        # Tăng ngưỡng lên 0.6 để lọc bớt nhiễu mờ
+        mask_clean = clean_mask_output(mask_prob_resized, threshold=0.6) 
         
-        # Kiểm tra nếu mask trống trơn (không tìm thấy u)
-        mask_ratio = np.sum(mask_binary) / (img_np.shape[0]*img_np.shape[1])
+        # Tính tỷ lệ diện tích u
+        mask_ratio = np.sum(mask_clean) / (img_np.shape[0]*img_np.shape[1])
+        
+        # Tạo ảnh hiển thị mask (Trắng/Đen)
+        mask_display = cv2.cvtColor(mask_clean * 255, cv2.COLOR_GRAY2RGB)
         if mask_ratio == 0:
-            # Viết chữ lên ảnh đen để báo người dùng
             cv2.putText(mask_display, "No Tumor Detected", (50, img_np.shape[0]//2), 
                         cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
 
-        # 2. Get Box & Crop
-        (x1, y1, x2, y2), roi_type = get_bounding_box(mask_binary)
+        # 2. Cắt ảnh dựa trên Mask sạch
+        (x1, y1, x2, y2), roi_type = get_bounding_box_from_mask(mask_clean)
         roi_img = img_np[y1:y2, x1:x2]
         
         # 3. Vẽ Khung Đỏ
@@ -157,59 +187,4 @@ if uploaded_file is not None:
         prob_benign = probs_np[0] + probs_np[1]
         prob_malignant = probs_np[2] + probs_np[3]
         
-        prob_normal = 0.0
-        # Nếu mask < 0.5% diện tích -> Coi là Bình thường
-        if mask_ratio < 0.005: 
-            prob_normal = 0.95; prob_benign = 0.05; prob_malignant = 0.0
-            status_text = "Bình thường"; status_color = "green"
-        else:
-            if prob_malignant > prob_benign:
-                status_text = "Nghi ngờ ÁC TÍNH"; status_color = "red"
-            else:
-                status_text = "Khả năng cao LÀNH TÍNH"; status_color = "blue"
-
-    # --- HIỂN THỊ KẾT QUẢ ---
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.image(img_with_box, caption="1. Định vị (Hộp đỏ)", use_column_width=True)
-    
-    with col2:
-        # Hiển thị Mask (Đã xử lý RGB)
-        st.image(mask_display, caption="2. Mask (Phân đoạn U-Net)", use_column_width=True)
-        
-    with col3:
-        st.image(roi_img, caption="3. Ảnh cắt (ROI)", use_column_width=True)
-        
-    with col4:
-        heatmap_colored = cv2.applyColorMap(np.uint8(255*heatmap), cv2.COLORMAP_JET)
-        heatmap_colored = cv2.cvtColor(heatmap_colored, cv2.COLOR_BGR2RGB)
-        superimposed = cv2.addWeighted(cv2.resize(roi_img, (224,224)), 0.6, heatmap_colored, 0.4, 0)
-        st.image(superimposed, caption="4. Giải thích (Grad-CAM)", use_column_width=True)
-
-    # --- BẢNG THÔNG SỐ ---
-    st.divider()
-    c1, c2 = st.columns([1, 1])
-    
-    with c1:
-        st.subheader(f":{status_color}[{status_text}]")
-        if prob_normal < 0.5:
-            st.write(f"Chi tiết: **BI-RADS {['2', '3', '4A', '4B+'][pred_idx]}**")
-        st.metric("Độ tin cậy (TRUST-Score)", f"{trust_score:.1%}")
-        st.caption(f"Cơ chế cắt: {roi_type}")
-        
-    with c2:
-        st.write("**Phân tích xác suất:**")
-        if prob_normal > 0.5:
-             st.progress(int(prob_normal * 100), text=f"Mô bình thường: {prob_normal:.1%}")
-        else:
-            st.progress(int(prob_benign * 100), text=f"Lành tính / Theo dõi: {prob_benign:.1%}")
-            st.progress(int(prob_malignant * 100), text=f"Ác tính (Nguy cơ cao): {prob_malignant:.1%}")
-
-    # Logic Cảnh báo
-    if trust_score < 0.4 and prob_normal < 0.5:
-        st.warning("⚠️ CẢNH BÁO: Độ tin cậy thấp. Vui lòng kiểm tra lại.")
-    elif pred_idx == 3 and prob_normal < 0.5:
-        st.error("🚨 KHUYẾN NGHỊ: Cần thực hiện sinh thiết ngay.")
-    elif prob_normal > 0.5:
-        st.success("✅ Không phát hiện bất thường.")
+        prob_normal =
