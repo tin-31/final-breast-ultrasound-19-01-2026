@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 st.set_page_config(page_title="TRUST-MED AI", page_icon="🩺", layout="wide")
 DEVICE = 'cpu'
 
-# 🔥 HÃY ĐẢM BẢO FILE ID CỦA BẠN ĐÃ ĐÚNG
+# 🔥 FILE ID (Giữ nguyên)
 SEG_FILE_ID = '1eUtmSEXAh9r-o_qRSk5oaYK7yfxjITfl' 
 CLS_FILE_ID = '1-v64E5VqSvbuKDYtdGDJBqUcWe9QfPVe'
 
@@ -23,13 +23,11 @@ CLS_PATH = 'TRUST_MED_CLS_BIRADS_FINAL.pth'
 # --- 1. TẢI VÀ LOAD MODEL ---
 @st.cache_resource
 def load_models():
-    # Tải file từ Drive
     if not os.path.exists(SEG_PATH):
         gdown.download(f'https://drive.google.com/uc?id={SEG_FILE_ID}', SEG_PATH, quiet=False)
     if not os.path.exists(CLS_PATH):
         gdown.download(f'https://drive.google.com/uc?id={CLS_FILE_ID}', CLS_PATH, quiet=False)
 
-    # Load Models
     seg_model = smp.Unet(encoder_name="resnet34", in_channels=3, classes=1, decoder_attention_type="scse")
     seg_model.load_state_dict(torch.load(SEG_PATH, map_location=torch.device(DEVICE)))
     seg_model.eval()
@@ -42,7 +40,7 @@ def load_models():
     return seg_model, cls_model
 
 try:
-    with st.spinner("⏳ Đang khởi động hệ thống (Lần đầu khoảng 1 phút)..."):
+    with st.spinner("⏳ Đang khởi động hệ thống..."):
         seg_model, cls_model = load_models()
 except Exception as e:
     st.error(f"Lỗi khởi động: {e}")
@@ -50,7 +48,6 @@ except Exception as e:
 
 # --- 2. CÁC HÀM XỬ LÝ ---
 def get_bounding_box(mask_pred, padding=0.2):
-    """Tìm tọa độ khối u"""
     contours, _ = cv2.findContours(mask_pred, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if contours:
         c = max(contours, key=cv2.contourArea)
@@ -111,25 +108,37 @@ if uploaded_file is not None:
             transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
         ])
         input_seg = preprocess_seg(image).unsqueeze(0).to(DEVICE)
+        
         with torch.no_grad():
             mask_logits = seg_model(input_seg)
-            mask_pred = (torch.sigmoid(mask_logits) > 0.5).float().numpy()[0,0]
+            # Lấy xác suất trước (để resize cho mượt)
+            mask_prob = torch.sigmoid(mask_logits).cpu().detach().numpy()[0,0]
         
-        mask_resized = cv2.resize(mask_pred, (img_np.shape[1], img_np.shape[0]), interpolation=cv2.INTER_NEAREST)
-        mask_ratio = np.sum(mask_resized) / (img_np.shape[0]*img_np.shape[1])
+        # Resize bản đồ xác suất về kích thước gốc
+        mask_prob_resized = cv2.resize(mask_prob, (img_np.shape[1], img_np.shape[0]))
+        # Ngưỡng 0.5 để tạo ảnh đen trắng
+        mask_binary = (mask_prob_resized > 0.5).astype(np.uint8)
         
-        # --- CHUẨN BỊ ẢNH MASK ĐỂ HIỂN THỊ ---
-        # Chuyển từ 0/1 float sang 0/255 uint8 để hiển thị thành ảnh đen trắng
-        mask_display = (mask_resized * 255).astype(np.uint8)
+        # TÍNH TOÁN HIỂN THỊ MASK (QUAN TRỌNG)
+        # Chuyển thành ảnh RGB (Trắng/Đen) để Streamlit hiển thị đúng
+        mask_display = cv2.cvtColor(mask_binary * 255, cv2.COLOR_GRAY2RGB)
+        
+        # Kiểm tra nếu mask trống trơn (không tìm thấy u)
+        mask_ratio = np.sum(mask_binary) / (img_np.shape[0]*img_np.shape[1])
+        if mask_ratio == 0:
+            # Viết chữ lên ảnh đen để báo người dùng
+            cv2.putText(mask_display, "No Tumor Detected", (50, img_np.shape[0]//2), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
 
         # 2. Get Box & Crop
-        (x1, y1, x2, y2), roi_type = get_bounding_box(mask_resized.astype(np.uint8))
+        (x1, y1, x2, y2), roi_type = get_bounding_box(mask_binary)
         roi_img = img_np[y1:y2, x1:x2]
         
-        # 3. VẼ KHUNG ĐỎ (RED BOX)
+        # 3. Vẽ Khung Đỏ
         img_with_box = img_np.copy()
         cv2.rectangle(img_with_box, (x1, y1), (x2, y2), (255, 0, 0), 4) 
-        cv2.putText(img_with_box, "TUMOR DETECTED", (x1, max(y1-10, 20)), 
+        label_box = "TUMOR DETECTED" if roi_type == "Soft-ROI" else "FALLBACK AREA"
+        cv2.putText(img_with_box, label_box, (x1, max(y1-10, 20)), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 0), 2)
 
         # 4. Classification
@@ -149,6 +158,7 @@ if uploaded_file is not None:
         prob_malignant = probs_np[2] + probs_np[3]
         
         prob_normal = 0.0
+        # Nếu mask < 0.5% diện tích -> Coi là Bình thường
         if mask_ratio < 0.005: 
             prob_normal = 0.95; prob_benign = 0.05; prob_malignant = 0.0
             status_text = "Bình thường"; status_color = "green"
@@ -158,15 +168,15 @@ if uploaded_file is not None:
             else:
                 status_text = "Khả năng cao LÀNH TÍNH"; status_color = "blue"
 
-    # --- HIỂN THỊ KẾT QUẢ (CHUYỂN SANG 4 CỘT) ---
+    # --- HIỂN THỊ KẾT QUẢ ---
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
         st.image(img_with_box, caption="1. Định vị (Hộp đỏ)", use_column_width=True)
     
-    # --- CỘT MỚI: HIỂN THỊ MASK ---
     with col2:
-        st.image(mask_display, caption="2. Mask (Phân đoạn)", use_column_width=True, clamp=True)
+        # Hiển thị Mask (Đã xử lý RGB)
+        st.image(mask_display, caption="2. Mask (Phân đoạn U-Net)", use_column_width=True)
         
     with col3:
         st.image(roi_img, caption="3. Ảnh cắt (ROI)", use_column_width=True)
@@ -186,6 +196,7 @@ if uploaded_file is not None:
         if prob_normal < 0.5:
             st.write(f"Chi tiết: **BI-RADS {['2', '3', '4A', '4B+'][pred_idx]}**")
         st.metric("Độ tin cậy (TRUST-Score)", f"{trust_score:.1%}")
+        st.caption(f"Cơ chế cắt: {roi_type}")
         
     with c2:
         st.write("**Phân tích xác suất:**")
@@ -195,10 +206,10 @@ if uploaded_file is not None:
             st.progress(int(prob_benign * 100), text=f"Lành tính / Theo dõi: {prob_benign:.1%}")
             st.progress(int(prob_malignant * 100), text=f"Ác tính (Nguy cơ cao): {prob_malignant:.1%}")
 
-    # Cảnh báo
+    # Logic Cảnh báo
     if trust_score < 0.4 and prob_normal < 0.5:
-        st.warning("⚠️ CẢNH BÁO: Độ tin cậy thấp. Hãy kiểm tra lại.")
+        st.warning("⚠️ CẢNH BÁO: Độ tin cậy thấp. Vui lòng kiểm tra lại.")
     elif pred_idx == 3 and prob_normal < 0.5:
-        st.error("🚨 KHUYẾN NGHỊ: Cần thực hiện sinh thiết.")
+        st.error("🚨 KHUYẾN NGHỊ: Cần thực hiện sinh thiết ngay.")
     elif prob_normal > 0.5:
         st.success("✅ Không phát hiện bất thường.")
