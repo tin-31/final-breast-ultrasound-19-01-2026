@@ -202,7 +202,7 @@ if menu == "🏠 Bàn làm việc (Chẩn đoán)":
 
     with col_right:
         if uploaded_file is None:
-            st.warning("👈 Vui lòng tải ảnh lên ở cột bên trái để bắt đầu.")
+            st.warning("👈 Vui lòng tải ảnh lên để bắt đầu.")
             st.image("https://img.freepik.com/free-vector/doctor-examining-patient-clinic_23-2148856559.jpg", width=400, caption="Hệ thống sẵn sàng...")
         else:
             # XỬ LÝ & HIỂN THỊ
@@ -371,9 +371,3 @@ elif menu == "ℹ️ Giới thiệu dự án":
     * Kết quả của AI **không thay thế** chẩn đoán của bác sĩ chuyên khoa.
     * Người dùng chịu trách nhiệm khi sử dụng thông tin từ ứng dụng này.
     """)
-
-# =====================================================
-# FOOTER
-# =====================================================
-st.sidebar.markdown("---")
-st.sidebar.caption("© 2024 TRUST-MED Project\nPhiên bản nghiên cứu.")
